@@ -1,0 +1,222 @@
+
+import os
+import yaml
+import torch
+import pandas as pd
+import torch.nn as nn
+import torch.optim as optim
+from glob import glob
+from tqdm import tqdm
+from collections import OrderedDict
+from ML_Pipeline.utils import AverageMeter,iou_score
+from albumentations import Resize
+# from albumentations.augmentations import transforms
+from albumentations import Compose, Resize
+from albumentations.augmentations.transforms import Normalize
+
+from albumentations.core.composition import Compose, OneOf
+#from albumentations.augmentations.transforms import RandomRotate90
+from ML_Pipeline.network import UNetPP, VGGBlock
+from ML_Pipeline.dataset import DataSet
+from ML_Pipeline.predict import image_loader
+
+import streamlit as st
+import torch
+import yaml
+import numpy as np
+import cv2
+from albumentations import Compose, Resize, Normalize
+from ML_Pipeline.network import UNetPP
+
+# Set random seeds
+import random
+random.seed(42)
+np.random.seed(42)
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+
+# Load configuration
+with open("config.yaml") as f:
+    config = yaml.safe_load(f)
+
+im_width = config["im_width"]
+im_height = config["im_height"]
+model_path = "../output/models/logs/model.pth"
+
+# Function to load the segmentation model
+@st.cache_resource
+def load_segmentation_model():
+    model = UNetPP(num_classes=1, input_channels=3, deep_supervision=True)
+    try:
+        model.load_state_dict(torch.load(model_path, map_location='cpu'))
+    except Exception as e:
+        st.error(f"Error loading segmentation model: {e}")
+        st.stop()
+    model.eval()
+    return model
+
+segmentation_model = load_segmentation_model()
+
+st.title("Colorectal Polyp Detection and Segmentation")
+
+# Instructions
+st.markdown("""
+This application allows you to upload an endoscopic image and performs segmentation to detect colorectal polyps.
+
+**How to use the application:**
+
+1. **Upload an Image:** Click on the "Browse files" button below to upload an image in PNG, JPG, or JPEG format.
+
+2. **View Results:** After uploading, the application will display:
+   - The input image.
+   - The classification result indicating whether a polyp is detected.
+   - The predicted segmentation mask.
+   - An overlay of the mask on the original image.
+
+**Note:** The model may take a few seconds to process the image.
+
+**Please ensure that you upload a colonoscopy or endoscopic image related to colorectal polyps.**
+""")
+
+uploaded_file = st.file_uploader(
+    "Choose an endoscopic image to upload",
+    type=["png", "jpg", "jpeg"],
+    help="Upload an image file in PNG, JPG, or JPEG format."
+)
+
+if uploaded_file is not None:
+    def image_loader_streamlit(image_data):
+        try:
+            image_cv = cv2.imdecode(np.frombuffer(image_data, np.uint8), cv2.IMREAD_COLOR)
+            if image_cv is None:
+                st.error("Invalid image file. Please upload a valid image.")
+                st.stop()
+            val_transform = Compose([
+                Resize(256, 256),
+                Normalize(),
+            ])
+            img = val_transform(image=image_cv)["image"]
+            img = img.astype('float32') / 255
+            img = img.transpose(2, 0, 1)
+            return img, image_cv
+        except Exception as e:
+            st.error(f"Error processing image: {e}")
+            st.stop()
+
+    image, original_image = image_loader_streamlit(uploaded_file.getvalue())
+
+    # Display the input image
+    st.subheader("Input Image")
+    st.image(
+        cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB),
+        caption='Input Image',
+        use_column_width=True
+    )
+
+    input_tensor = torch.from_numpy(np.expand_dims(image, 0)).float()
+
+    # Run the segmentation model
+    with torch.no_grad():
+        try:
+            mask = segmentation_model(input_tensor)
+            if isinstance(mask, (list, tuple)):
+                mask = mask[-1]
+            mask = mask.cpu()
+            mask = torch.sigmoid(mask)  # Apply sigmoid activation
+            mask_np = mask.numpy()
+            mask_np = np.squeeze(np.squeeze(mask_np, axis=0), axis=0)
+        except Exception as e:
+            st.error(f"Error during model prediction: {e}")
+            st.stop()
+
+    # Calculate statistical measures
+    mask_mean = np.mean(mask_np)
+    mask_std = np.std(mask_np)
+    mask_sum = np.sum(mask_np)
+    mask_max = np.max(mask_np)
+
+    # Additional heuristic checks
+    # Binarize the mask at a lower threshold
+    lower_threshold = 0.1
+    mask_binary_low = np.zeros_like(mask_np)
+    mask_binary_low[mask_np >= lower_threshold] = 1
+    mask_binary_low[mask_np < lower_threshold] = 0
+
+    # Convert mask to uint8
+    mask_binary_low_uint8 = mask_binary_low.astype(np.uint8)
+
+    # Find connected components
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask_binary_low_uint8, connectivity=8)
+
+    # Number of significant components (excluding background)
+    num_components = num_labels - 1
+
+    # Size of the largest component
+    if num_components > 0:
+        largest_component_size = np.max(stats[1:, cv2.CC_STAT_AREA])  # Exclude background
+    else:
+        largest_component_size = 0
+
+    # Set thresholds based on experimentation
+    mean_threshold = 0.1
+    std_threshold = 0.25
+    sum_threshold = 5000
+    max_value_threshold = 0.99
+    component_size_threshold = 5000
+
+    # Check if the image is likely irrelevant
+    if ((mask_mean < mean_threshold) and
+        (mask_std < std_threshold) and
+        (mask_sum < sum_threshold) and
+        (mask_max < max_value_threshold) and
+        (largest_component_size < component_size_threshold)):
+        st.error("Unrecognized image. Please upload an endoscopic image related to colorectal polyps.")
+        st.stop()
+
+    # Threshold the mask
+    threshold = 0.5
+    mask_binary = np.zeros_like(mask_np)
+    mask_binary[mask_np >= threshold] = 255
+    mask_binary[mask_np < threshold] = 0
+
+    # Determine if the image is positive or negative
+    if np.sum(mask_binary) > 0:
+        classification = "Positive for colorectal polyp"
+        classification_color = "red"
+    else:
+        classification = "Negative for colorectal polyp"
+        classification_color = "green"
+
+    # Resize the mask to the original image size
+    mask_resized = cv2.resize(mask_binary, (original_image.shape[1], original_image.shape[0]))
+    mask_resized = mask_resized.astype(np.uint8)
+
+    # Create overlay
+    overlay = original_image.copy()
+    overlay[mask_resized == 255] = [0, 0, 255]  # Red color for polyp area
+
+    # Display the classification result
+    st.subheader("Classification Result")
+    st.markdown(
+        f"<h3 style='color:{classification_color}'>{classification}</h3>",
+        unsafe_allow_html=True
+    )
+
+    # Display the segmentation mask
+    st.subheader("Predicted Segmentation Mask")
+    st.image(
+        mask_resized,
+        caption='Predicted Mask',
+        use_column_width=True,
+        clamp=True
+    )
+
+    # Display the overlay image
+    st.subheader("Overlay of Mask on Original Image")
+    st.image(
+        cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB),
+        caption='Overlay Image',
+        use_column_width=True
+    )
+else:
+    st.info("Please upload an image to get started.")
