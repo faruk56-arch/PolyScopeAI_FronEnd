@@ -28,7 +28,7 @@ import cv2
 from albumentations import Compose, Resize, Normalize
 from ML_Pipeline.network import UNetPP
 
-st.markdown("Please note that this application is currently under development. While it aims to provide accurate detection and segmentation of colorectal polyps, it may occasionally produce incorrect or unexpected results. We appreciate your understanding and welcome any feedback to help improve the system.")
+
 # Set random seeds
 import random
 random.seed(42)
