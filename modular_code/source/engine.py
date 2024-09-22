@@ -28,6 +28,13 @@ import cv2
 from albumentations import Compose, Resize, Normalize
 from ML_Pipeline.network import UNetPP
 
+import streamlit as st
+import torch
+import yaml
+import numpy as np
+import cv2
+from albumentations import Compose, Resize, Normalize
+from ML_Pipeline.network import UNetPP
 
 # Set random seeds
 import random
@@ -35,6 +42,14 @@ random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
 torch.cuda.manual_seed_all(42)
+
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="Colorectal Polyp Detection and Segmentation",
+    page_icon="🔬",
+    layout="centered",
+    initial_sidebar_state="expanded",
+)
 
 # Load configuration
 with open("config.yaml") as f:
@@ -58,6 +73,62 @@ def load_segmentation_model():
 
 segmentation_model = load_segmentation_model()
 
+# --- Custom CSS for styling ---
+st.markdown(
+    """
+    <style>
+    /* Center the title */
+    .css-1v0mbdj.e1fqkh3o3 {
+        text-align: center;
+    }
+    /* Adjust the width of the main content */
+    .css-1wrcr25.egzxvld3 {
+        max-width: 800px;
+        margin: auto;
+    }
+    /* Style the subheaders */
+    .stMarkdown h3 {
+        color: #2c3e50;
+        text-align: center;
+    }
+    /* Style the classification result */
+    .classification-result h3 {
+        text-align: center;
+    }
+    /* Style the error message */
+    .css-10trblm {
+        text-align: center;
+    }
+    /* Custom font */
+    @import url('https://fonts.googleapis.com/css2?family=Roboto&display=swap');
+    html, body, [class*="css"] {
+        font-family: 'Roboto', sans-serif;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# --- Sidebar ---
+with st.sidebar:
+    st.image("./logo1.jpeg", use_column_width=True)
+    st.markdown("""
+    ## About
+    This application utilizes a deep learning model to detect and segment colorectal polyps from endoscopic images.
+
+    ## Instructions
+    - Upload an endoscopic image.
+    - View the segmentation results.
+    - The application will indicate if a polyp is detected.
+
+    **Disclaimer:** Please note that this application is currently under development and may occasionally produce incorrect results.
+
+    ## Developed by
+    - **Momin Faruk**
+    - Master's Thesis in AI and Medical Imaging
+    """)
+
+# --- Main Content ---
 st.title("🔬 Colorectal Polyp Detection and Segmentation")
 
 # Instructions
@@ -117,18 +188,19 @@ if uploaded_file is not None:
     input_tensor = torch.from_numpy(np.expand_dims(image, 0)).float()
 
     # Run the segmentation model
-    with torch.no_grad():
-        try:
-            mask = segmentation_model(input_tensor)
-            if isinstance(mask, (list, tuple)):
-                mask = mask[-1]
-            mask = mask.cpu()
-            mask = torch.sigmoid(mask)  # Apply sigmoid activation
-            mask_np = mask.numpy()
-            mask_np = np.squeeze(np.squeeze(mask_np, axis=0), axis=0)
-        except Exception as e:
-            st.error(f"Error during model prediction: {e}")
-            st.stop()
+    with st.spinner("Processing..."):
+        with torch.no_grad():
+            try:
+                mask = segmentation_model(input_tensor)
+                if isinstance(mask, (list, tuple)):
+                    mask = mask[-1]
+                mask = mask.cpu()
+                mask = torch.sigmoid(mask)  # Apply sigmoid activation
+                mask_np = mask.numpy()
+                mask_np = np.squeeze(np.squeeze(mask_np, axis=0), axis=0)
+            except Exception as e:
+                st.error(f"Error during model prediction: {e}")
+                st.stop()
 
     # Calculate statistical measures
     mask_mean = np.mean(mask_np)
@@ -158,13 +230,12 @@ if uploaded_file is not None:
     else:
         largest_component_size = 0
 
-    # Set thresholds based on experimentation
-    mean_threshold = 0.1
-    std_threshold = 0.25
-    sum_threshold = 5000
-    max_value_threshold = 0.99
-    component_size_threshold = 5000
-
+    mean_threshold = 0.01
+    std_threshold = 0.01
+    sum_threshold = 500
+    max_value_threshold = 0.1
+    component_size_threshold = 500
+    
     # Check if the image is likely irrelevant
     if ((mask_mean < mean_threshold) and
         (mask_std < std_threshold) and
@@ -189,46 +260,21 @@ if uploaded_file is not None:
         classification_color = "green"
 
     # Resize the mask to the original image size
-    mask_resized = cv2.resize(mask_binary, (original_image.shape[1], original_image.shape[0]))
+    mask_resized = cv2.resize(mask_binary, (original_image.shape[1], original_image.shape[0]), interpolation=cv2.INTER_NEAREST)
     mask_resized = mask_resized.astype(np.uint8)
 
     # Create overlay
     overlay = original_image.copy()
     overlay[mask_resized == 255] = [0, 0, 255]  # Red color for polyp area
 
-#     # Display the classification result
-#     st.subheader("Classification Result")
-#     st.markdown(
-#         f"<h3 style='color:{classification_color}'>{classification}</h3>",
-#         unsafe_allow_html=True
-#     )
-
-#     # Display the segmentation mask
-#     st.subheader("Predicted Segmentation Mask")
-#     st.image(
-#         mask_resized,
-#         caption='Predicted Mask',
-#         use_column_width=True,
-#         clamp=True
-#     )
-
-#     # Display the overlay image
-#     st.subheader("Overlay of Mask on Original Image")
-#     st.image(
-#         cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB),
-#         caption='Overlay Image',
-#         use_column_width=True
-#     )
-# else:
-#     st.info("Please upload an image to get started.")
     st.markdown("---")
     st.markdown(f"<h3 style='color:{classification_color}; text-align: center;'>{classification}</h3>", unsafe_allow_html=True)
 
-    # Display images in tabs
+    # Display images in columns
     st.subheader("Results")
-    tab1, tab2, tab3 = st.tabs(["Segmentation Mask", "Overlay Image", "Input vs. Overlay"])
+    col1, col2 = st.columns(2)
 
-    with tab1:
+    with col1:
         st.image(
             mask_resized,
             caption='Predicted Segmentation Mask',
@@ -236,18 +282,12 @@ if uploaded_file is not None:
             clamp=True,
         )
 
-    with tab2:
+    with col2:
         st.image(
             cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB),
             caption='Overlay on Original Image',
             use_column_width=True,
         )
 
-    with tab3:
-        st.image(
-            [cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB), cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)],
-            caption=['Original Image', 'Overlay Image'],
-            use_column_width=True,
-        )
 else:
     st.info("Please upload an image to get started.")
